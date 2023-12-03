@@ -12,9 +12,8 @@ INITIAL_SSTHRESH = 12000
 INITIAL_SEQUENCE_NUMBER = 50000
 RETRANSMISSION_TIMEOUT = 0.5
 
-
-def simulate_packet_loss(probability):
-    return random.random() < probability
+# Add a lock for thread safety when accessing shared resources
+lock = threading.Lock()
 
 
 class CongestionControl:
@@ -32,9 +31,10 @@ class CongestionControl:
         self.timeout_timer.start()
 
     def handle_timeout(self, confundo_socket):
-        confundo_socket.sequence_number = self.last_acked_seq + 1
-        self.cwnd = 1
-        self.ssthresh = max(self.cwnd / 2, 2)
+        with lock:
+            confundo_socket.sequence_number = self.last_acked_seq + 1
+            self.cwnd = 1
+            self.ssthresh = max(self.cwnd / 2, 2)
 
 
 class ConfundoSocket:
@@ -113,13 +113,11 @@ class ConfundoSocket:
 
     def send(self, data):
         packet = self._construct_packet(data)
-
         self.sock.sendto(packet, (self.remote_address, self.remote_port))
-
-        self.sequence_number += len(data)
+        self.sequence_number += len(data)  # Increment the sequence number correctly
 
     def _construct_packet(self, data):
-        header = struct.pack('!I I B', self.sequence_number, self.acknowledgment_number, 0x00)
+        header = struct.pack('!I I B', self.sequence_number, self.acknowledgment_number, len(data))
         packet = header + data
         return packet
 
@@ -135,10 +133,11 @@ class ConfundoSocket:
         start_time = time.time()
         while time.time() - start_time < 2:
             packet, _ = self.sock.recvfrom(MAX_PACKET_SIZE)
-            self.handle_received_packet(packet)
-            if self.is_fin_packet(packet):
-                self.send_ack()
-                break
+            with lock:
+                self.handle_received_packet(packet)
+                if self.is_fin_packet(packet):
+                    self.send_ack()
+                    break
 
         self.sock.close()
 
@@ -147,9 +146,10 @@ class ConfundoSocket:
         is_fin = (flags & 4) == 4
 
         if is_fin:
-            self._handle_fin()
-            self.send_ack()
-            self.set_state('CLOSE_WAIT')
+            with lock:
+                self._handle_fin()
+                self.send_ack()
+                self.set_state('CLOSE_WAIT')
         elif self.state == 'SYN_SENT' and ack_number == self.sequence_number + 1:
             self.set_state('ESTABLISHED')
             self.acknowledgment_number = seq_number + 1
@@ -230,14 +230,14 @@ class ConfundoClient:
 
     def test_case_2_6(self):
         self.confundo_socket.close()
-
         start_time = time.time()
         while time.time() - start_time < 2:
             packet, _ = self.confundo_socket.sock.recvfrom(MAX_PACKET_SIZE)
-            self.confundo_socket.handle_received_packet(packet)
-            if self.confundo_socket.get_state() == 'CLOSE_WAIT':
-                self.confundo_socket.send_ack()
-                break
+            with lock:
+                self.confundo_socket.handle_received_packet(packet)
+                if self.confundo_socket.get_state() == 'CLOSE_WAIT':
+                    self.confundo_socket.send_ack()
+                    break
 
     def test_case_2_9(self):
         congestion_control = CongestionControl()
@@ -283,7 +283,8 @@ class ConfundoClient:
 def simulate_lossy_link_with_delay(client, loss_probability=0.1, delay_seconds=2):
     def delayed_send():
         time.sleep(delay_seconds)
-        client.confundo_socket.send(b'DATA')  # Placeholder data, replace with actual data
+        with lock:
+            client.confundo_socket.send(b'DATA')  # Placeholder data, replace with actual data
 
     with open(client.filename, 'rb') as file:
         data = file.read(MTU_SIZE)
@@ -293,8 +294,11 @@ def simulate_lossy_link_with_delay(client, loss_probability=0.1, delay_seconds=2
                 time.sleep(0.01)
             else:
                 print("DROP", client.confundo_socket.sequence_number, 0, 3)
-
             data = file.read(MTU_SIZE)
+
+
+def simulate_packet_loss(probability):
+    return random.random() > probability
 
 
 # Example usage of ConfundoClient and running tests
